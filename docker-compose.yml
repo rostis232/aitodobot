@@ -18,8 +18,8 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       DATABASE_URL: postgres://tg_tasks:tg_tasks@db:5432/tg_tasks?sslmode=disable
       MASTER_KEY: ${MASTER_KEY}
-      OPENAI_DEFAULT_MODEL: ${OPENAI_DEFAULT_MODEL:-gpt-4o-mini}
-      OPENAI_TRANSCRIBE_MODEL: ${OPENAI_TRANSCRIBE_MODEL:-whisper-1}
+      OPENAI_DEFAULT_MODEL: ${OPENAI_DEFAULT_MODEL:-gpt-4o}
+      OPENAI_TRANSCRIBE_MODEL: ${OPENAI_TRANSCRIBE_MODEL:-gpt-4o-mini-transcribe}
     depends_on:
       - db
 

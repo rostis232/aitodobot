@@ -23,10 +23,10 @@ func FromEnv() (Config, error) {
 	}
 
 	if cfg.OpenAIDefaultModel == "" {
-		cfg.OpenAIDefaultModel = "gpt-4o-mini"
+		cfg.OpenAIDefaultModel = "gpt-4o"
 	}
 	if cfg.OpenAITranscribeModel == "" {
-		cfg.OpenAITranscribeModel = "whisper-1"
+		cfg.OpenAITranscribeModel = "gpt-4o-mini-transcribe"
 	}
 
 	if cfg.TelegramToken == "" {
