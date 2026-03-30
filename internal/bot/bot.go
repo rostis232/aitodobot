@@ -121,6 +121,7 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
 	case "start":
 		b.sendText(chatID, strings.TrimSpace(`
 Я бот для особистих задач.
+Створено: https://beehivelogic.com/
 
 Команди:
 - /add текст ; due=YYYY-MM-DD (опційно)

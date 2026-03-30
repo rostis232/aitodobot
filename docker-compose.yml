@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: tg_tasks
       POSTGRES_USER: tg_tasks
@@ -12,6 +13,7 @@ services:
 
   bot:
     build: .
+    restart: unless-stopped
     environment:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       DATABASE_URL: postgres://tg_tasks:tg_tasks@db:5432/tg_tasks?sslmode=disable
