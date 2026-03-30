@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -110,7 +111,7 @@ func (b *Bot) handleMessage(ctx context.Context, m *tgbotapi.Message) {
 		return
 	}
 
-	b.handleNaturalLanguage(ctx, chatID, userID, text)
+	b.handleChatInput(ctx, chatID, userID, text)
 }
 
 func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
@@ -123,229 +124,398 @@ func (b *Bot) handleCommand(ctx context.Context, m *tgbotapi.Message) {
 Я бот для особистих задач.
 Створено: https://beehivelogic.com/
 
-Команди:
-- /add текст ; due=YYYY-MM-DD (опційно)
-- /edit_text ID новий текст
-- /edit_due ID YYYY-MM-DD | none
-- /status ID todo|doing|done
-- /delete ID (з підтвердженням)
-- /list (опційно: status=..., from=YYYY-MM-DD, to=YYYY-MM-DD)
+Пиши мені як у звичайному чаті:
+- "Додай задачу купити молоко завтра"
+- "Покажи задачі на цей тиждень"
+- "Зміни статус задачі 3 на done"
+- "Видали задачу 5" (я попрошу підтвердити)
 
-Також можна писати звичайним текстом або надсилати голосові — використаю OpenAI для розбору (попрошу ваш API ключ один раз).`))
-	case "add":
-		text, due := parseAddArgs(strings.TrimSpace(m.CommandArguments()))
-		if text == "" {
-			b.sendText(chatID, "Формат: /add текст ; due=YYYY-MM-DD (опційно)")
-			return
-		}
-		id, err := b.repo.CreateTask(ctx, userID, text, due)
-		if err != nil {
-			slog.Error("create task", "err", err, "user_id", userID)
-			b.sendText(chatID, "Не вдалося створити задачу.")
-			return
-		}
-		slog.Info("task created", "user_id", userID, "task_id", id)
-		b.sendText(chatID, fmt.Sprintf("Створено задачу #%d.", id))
-	case "edit_text":
-		id, rest, ok := parseIDAndRest(m.CommandArguments())
-		if !ok || strings.TrimSpace(rest) == "" {
-			b.sendText(chatID, "Формат: /edit_text ID новий текст")
-			return
-		}
-		if err := b.repo.UpdateTaskText(ctx, userID, id, strings.TrimSpace(rest)); err != nil {
-			slog.Warn("update task text", "err", err, "user_id", userID, "task_id", id)
-			b.sendText(chatID, "Не вдалося оновити задачу (перевірте ID).")
-			return
-		}
-		slog.Info("task text updated", "user_id", userID, "task_id", id)
-		b.sendText(chatID, "Оновлено текст задачі.")
-	case "edit_due":
-		id, rest, ok := parseIDAndRest(m.CommandArguments())
-		if !ok {
-			b.sendText(chatID, "Формат: /edit_due ID YYYY-MM-DD | none")
-			return
-		}
-		var due *time.Time
-		arg := strings.TrimSpace(rest)
-		if arg != "" && strings.ToLower(arg) != "none" {
-			t, err := parseDate(arg)
-			if err != nil {
-				b.sendText(chatID, "Невірна дата. Формат: YYYY-MM-DD або none")
-				return
-			}
-			due = &t
-		}
-		if err := b.repo.UpdateTaskDue(ctx, userID, id, due); err != nil {
-			slog.Warn("update task due", "err", err, "user_id", userID, "task_id", id)
-			b.sendText(chatID, "Не вдалося оновити дату (перевірте ID).")
-			return
-		}
-		slog.Info("task due updated", "user_id", userID, "task_id", id)
-		b.sendText(chatID, "Оновлено дату задачі.")
-	case "status":
-		id, rest, ok := parseIDAndRest(m.CommandArguments())
-		if !ok {
-			b.sendText(chatID, "Формат: /status ID todo|doing|done")
-			return
-		}
-		st := strings.ToLower(strings.TrimSpace(rest))
-		if st != "todo" && st != "doing" && st != "done" {
-			b.sendText(chatID, "Статус має бути: todo|doing|done")
-			return
-		}
-		if err := b.repo.UpdateTaskStatus(ctx, userID, id, st); err != nil {
-			slog.Warn("update task status", "err", err, "user_id", userID, "task_id", id)
-			b.sendText(chatID, "Не вдалося оновити статус (перевірте ID).")
-			return
-		}
-		slog.Info("task status updated", "user_id", userID, "task_id", id, "status", st)
-		b.sendText(chatID, "Оновлено статус задачі.")
-	case "delete":
-		id, _, ok := parseIDAndRest(m.CommandArguments())
-		if !ok {
-			b.sendText(chatID, "Формат: /delete ID")
-			return
-		}
-		b.askDeleteConfirm(chatID, id)
-	case "list":
-		f, err := parseListArgs(strings.TrimSpace(m.CommandArguments()))
-		if err != nil {
-			b.sendText(chatID, "Формат: /list status=todo|doing|done from=YYYY-MM-DD to=YYYY-MM-DD (усе опційно)")
-			return
-		}
-		tasks, err := b.repo.ListTasks(ctx, userID, f)
-		if err != nil {
-			slog.Error("list tasks", "err", err, "user_id", userID)
-			b.sendText(chatID, "Не вдалося отримати список задач.")
-			return
-		}
-		slog.Info("tasks listed", "user_id", userID, "count", len(tasks))
-		b.sendText(chatID, formatTasks(tasks))
+Також можна надсилати голосові — я їх транскрибую і зрозумію як текст.
+
+Перед першим використанням я попрошу ваш OpenAI API key і збережу його зашифровано.`))
 	default:
-		b.sendText(chatID, "Невідома команда. /start для допомоги.")
+		text := strings.TrimSpace(firstNonEmpty(m.Text, m.Caption))
+		if text == "" {
+			return
+		}
+		b.handleChatInput(ctx, chatID, userID, text)
 	}
 }
 
-func (b *Bot) handleNaturalLanguage(ctx context.Context, chatID int64, userID int64, input string) {
+func (b *Bot) handleChatInput(ctx context.Context, chatID int64, userID int64, input string) {
 	apiKey, ok := b.ensureKeyOrAsk(ctx, chatID, userID)
 	if !ok {
 		return
 	}
 
-	act, err := b.openai.ParseTextToAction(ctx, apiKey, b.defaultChatModel, input)
-	if err != nil {
-		slog.Error("parse action", "err", err, "user_id", userID)
-		b.sendText(chatID, "Не вдалося розібрати запит. Спробуйте інакше або використайте команди (/start).")
-		return
+	if err := b.repo.AppendChatMessage(ctx, userID, "user", input); err != nil {
+		slog.Error("append chat message", "err", err, "user_id", userID)
 	}
 
-	switch act.Action {
-	case "create":
-		if act.Text == nil || strings.TrimSpace(*act.Text) == "" {
-			b.sendText(chatID, "Не бачу текст задачі. Напишіть, що треба зробити.")
-			return
+	history, err := b.repo.LoadRecentChatMessages(ctx, userID, 20)
+	if err != nil {
+		slog.Error("load chat history", "err", err, "user_id", userID)
+		history = nil
+	}
+
+	sys := `Ти асистент для управління особистими задачами.
+Спілкуйся українською, як у звичайному чаті. Якщо бракує даних (наприклад, ID задачі), постав уточнююче питання.
+Статуси задач: todo, doing, done.
+Дати приймай у форматі YYYY-MM-DD. Якщо користувач каже "без дати" — прибери due_date (null).
+Для роботи з базою завжди використовуй tools. Не вигадуй задачі без tool-виклику.
+Для видалення спочатку виклич request_delete_task (щоб бот попросив підтвердження). Після підтвердження користувачем — виклич delete_task.`
+
+	msgs := []openai.ChatMessage{{Role: "system", Content: sys}}
+	for _, m := range history {
+		role := m.Role
+		if role != "user" && role != "assistant" {
+			continue
 		}
-		var due *time.Time
-		if act.DueDate != nil && strings.TrimSpace(*act.DueDate) != "" {
-			t, err := parseDate(strings.TrimSpace(*act.DueDate))
-			if err == nil {
-				due = &t
-			}
-		}
-		id, err := b.repo.CreateTask(ctx, userID, strings.TrimSpace(*act.Text), due)
+		msgs = append(msgs, openai.ChatMessage{Role: role, Content: m.Content})
+	}
+
+	tools := b.taskTools()
+
+	var final string
+	for i := 0; i < 6; i++ {
+		assistant, _, err := b.openai.ChatCompletion(ctx, apiKey, b.defaultChatModel, msgs, tools)
 		if err != nil {
-			slog.Error("create task (nl)", "err", err, "user_id", userID)
-			b.sendText(chatID, "Не вдалося створити задачу.")
+			slog.Error("openai chat completion", "err", err, "user_id", userID)
+			b.sendText(chatID, "Не вдалося відповісти. Спробуйте ще раз.")
 			return
 		}
-		slog.Info("task created (nl)", "user_id", userID, "task_id", id)
-		b.sendText(chatID, fmt.Sprintf("Створено задачу #%d.", id))
-	case "edit_text":
-		if act.TaskID == nil || act.Text == nil {
-			b.sendText(chatID, "Для редагування потрібен ID та новий текст.")
-			return
+
+		msgs = append(msgs, assistant)
+
+		if len(assistant.ToolCalls) == 0 {
+			final = strings.TrimSpace(assistant.Content)
+			break
 		}
-		if err := b.repo.UpdateTaskText(ctx, userID, *act.TaskID, strings.TrimSpace(*act.Text)); err != nil {
-			slog.Warn("update task text (nl)", "err", err, "user_id", userID, "task_id", *act.TaskID)
-			b.sendText(chatID, "Не вдалося оновити задачу (перевірте ID).")
-			return
+
+		for _, tc := range assistant.ToolCalls {
+			out := b.executeToolCall(ctx, chatID, userID, tc)
+			msgs = append(msgs, openai.ChatMessage{
+				Role:       "tool",
+				ToolCallID: tc.ID,
+				Content:    out,
+			})
 		}
-		slog.Info("task text updated (nl)", "user_id", userID, "task_id", *act.TaskID)
-		b.sendText(chatID, "Оновлено текст задачі.")
-	case "edit_due":
-		if act.TaskID == nil {
-			b.sendText(chatID, "Для зміни дати потрібен ID.")
-			return
+	}
+
+	if final == "" {
+		final = "Готово."
+	}
+
+	if err := b.repo.AppendChatMessage(ctx, userID, "assistant", final); err != nil {
+		slog.Error("append chat message", "err", err, "user_id", userID)
+	}
+	b.sendText(chatID, final)
+}
+
+func (b *Bot) taskTools() []openai.Tool {
+	return []openai.Tool{
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "create_task",
+				Description: "Створити нову задачу",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"text": map[string]any{
+							"type":        "string",
+							"description": "Текст задачі",
+						},
+						"due_date": map[string]any{
+							"type":        []any{"string", "null"},
+							"description": "Дата виконання YYYY-MM-DD або null якщо без дати",
+						},
+					},
+					"required": []any{"text"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "update_task_text",
+				Description: "Змінити текст задачі",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{"type": "integer"},
+						"text":    map[string]any{"type": "string"},
+					},
+					"required": []any{"task_id", "text"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "update_task_due",
+				Description: "Змінити або прибрати дату виконання задачі",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{"type": "integer"},
+						"due_date": map[string]any{
+							"type":        []any{"string", "null"},
+							"description": "YYYY-MM-DD або null щоб прибрати дату",
+						},
+					},
+					"required": []any{"task_id", "due_date"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "update_task_status",
+				Description: "Змінити статус задачі",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{"type": "integer"},
+						"status":  map[string]any{"type": "string", "enum": []any{"todo", "doing", "done"}},
+					},
+					"required": []any{"task_id", "status"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "list_tasks",
+				Description: "Показати список задач з фільтрами",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"status": map[string]any{"type": []any{"string", "null"}, "description": "todo|doing|done або null"},
+						"from":   map[string]any{"type": []any{"string", "null"}, "description": "YYYY-MM-DD або null"},
+						"to":     map[string]any{"type": []any{"string", "null"}, "description": "YYYY-MM-DD або null"},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "request_delete_task",
+				Description: "Запросити підтвердження видалення задачі через кнопки в Telegram",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{"type": "integer"},
+					},
+					"required": []any{"task_id"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "delete_task",
+				Description: "Видалити задачу (використовувати тільки після підтвердження користувачем)",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"task_id": map[string]any{"type": "integer"},
+					},
+					"required": []any{"task_id"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: openai.ToolFunction{
+				Name:        "cancel_delete",
+				Description: "Скасувати pending видалення (якщо було)",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+				},
+			},
+		},
+	}
+}
+
+func (b *Bot) executeToolCall(ctx context.Context, chatID int64, userID int64, tc openai.ToolCall) string {
+	mustJSON := func(v any) string {
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+
+	switch tc.Function.Name {
+	case "create_task":
+		var args struct {
+			Text    string  `json:"text"`
+			DueDate *string `json:"due_date"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		text := strings.TrimSpace(args.Text)
+		if text == "" {
+			return mustJSON(map[string]any{"ok": false, "error": "text is required"})
 		}
 		var due *time.Time
-		if act.DueDate != nil && strings.TrimSpace(*act.DueDate) != "" {
-			t, err := parseDate(strings.TrimSpace(*act.DueDate))
-			if err == nil {
-				due = &t
+		if args.DueDate != nil && strings.TrimSpace(*args.DueDate) != "" {
+			t, err := parseDate(strings.TrimSpace(*args.DueDate))
+			if err != nil {
+				return mustJSON(map[string]any{"ok": false, "error": "invalid due_date"})
 			}
+			due = &t
 		}
-		if err := b.repo.UpdateTaskDue(ctx, userID, *act.TaskID, due); err != nil {
-			slog.Warn("update task due (nl)", "err", err, "user_id", userID, "task_id", *act.TaskID)
-			b.sendText(chatID, "Не вдалося оновити дату (перевірте ID).")
-			return
+		id, err := b.repo.CreateTask(ctx, userID, text, due)
+		if err != nil {
+			slog.Error("tool create_task", "err", err, "user_id", userID)
+			return mustJSON(map[string]any{"ok": false, "error": "db error"})
 		}
-		slog.Info("task due updated (nl)", "user_id", userID, "task_id", *act.TaskID)
-		b.sendText(chatID, "Оновлено дату задачі.")
-	case "edit_status":
-		if act.TaskID == nil || act.Status == nil {
-			b.sendText(chatID, "Для зміни статусу потрібен ID та статус.")
-			return
+		return mustJSON(map[string]any{"ok": true, "task_id": id})
+
+	case "update_task_text":
+		var args struct {
+			TaskID int64  `json:"task_id"`
+			Text   string `json:"text"`
 		}
-		st := strings.ToLower(strings.TrimSpace(*act.Status))
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		text := strings.TrimSpace(args.Text)
+		if text == "" {
+			return mustJSON(map[string]any{"ok": false, "error": "text is required"})
+		}
+		if err := b.repo.UpdateTaskText(ctx, userID, args.TaskID, text); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": err.Error()})
+		}
+		return mustJSON(map[string]any{"ok": true})
+
+	case "update_task_due":
+		var args struct {
+			TaskID  int64   `json:"task_id"`
+			DueDate *string `json:"due_date"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		var due *time.Time
+		if args.DueDate != nil && strings.TrimSpace(*args.DueDate) != "" {
+			t, err := parseDate(strings.TrimSpace(*args.DueDate))
+			if err != nil {
+				return mustJSON(map[string]any{"ok": false, "error": "invalid due_date"})
+			}
+			due = &t
+		}
+		if err := b.repo.UpdateTaskDue(ctx, userID, args.TaskID, due); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": err.Error()})
+		}
+		return mustJSON(map[string]any{"ok": true})
+
+	case "update_task_status":
+		var args struct {
+			TaskID int64  `json:"task_id"`
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		st := strings.ToLower(strings.TrimSpace(args.Status))
 		if st != "todo" && st != "doing" && st != "done" {
-			b.sendText(chatID, "Статус має бути: todo|doing|done")
-			return
+			return mustJSON(map[string]any{"ok": false, "error": "invalid status"})
 		}
-		if err := b.repo.UpdateTaskStatus(ctx, userID, *act.TaskID, st); err != nil {
-			slog.Warn("update task status (nl)", "err", err, "user_id", userID, "task_id", *act.TaskID)
-			b.sendText(chatID, "Не вдалося оновити статус (перевірте ID).")
-			return
+		if err := b.repo.UpdateTaskStatus(ctx, userID, args.TaskID, st); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": err.Error()})
 		}
-		slog.Info("task status updated (nl)", "user_id", userID, "task_id", *act.TaskID, "status", st)
-		b.sendText(chatID, "Оновлено статус задачі.")
-	case "delete":
-		if act.TaskID == nil {
-			b.sendText(chatID, "Для видалення потрібен ID.")
-			return
+		return mustJSON(map[string]any{"ok": true})
+
+	case "list_tasks":
+		var args struct {
+			Status *string `json:"status"`
+			From   *string `json:"from"`
+			To     *string `json:"to"`
 		}
-		b.askDeleteConfirm(chatID, *act.TaskID)
-	case "list":
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
 		f := repo.ListFilter{}
-		if act.Filter != nil {
-			if act.Filter.Status != nil {
-				s := strings.ToLower(strings.TrimSpace(*act.Filter.Status))
-				if s == "todo" || s == "doing" || s == "done" {
-					f.Status = &s
-				}
+		if args.Status != nil && strings.TrimSpace(*args.Status) != "" {
+			s := strings.ToLower(strings.TrimSpace(*args.Status))
+			if s == "todo" || s == "doing" || s == "done" {
+				f.Status = &s
 			}
-			if act.Filter.From != nil && strings.TrimSpace(*act.Filter.From) != "" {
-				t, err := parseDate(strings.TrimSpace(*act.Filter.From))
-				if err == nil {
-					f.From = &t
-				}
+		}
+		if args.From != nil && strings.TrimSpace(*args.From) != "" {
+			t, err := parseDate(strings.TrimSpace(*args.From))
+			if err == nil {
+				f.From = &t
 			}
-			if act.Filter.To != nil && strings.TrimSpace(*act.Filter.To) != "" {
-				t, err := parseDate(strings.TrimSpace(*act.Filter.To))
-				if err == nil {
-					f.To = &t
-				}
+		}
+		if args.To != nil && strings.TrimSpace(*args.To) != "" {
+			t, err := parseDate(strings.TrimSpace(*args.To))
+			if err == nil {
+				f.To = &t
 			}
 		}
 		tasks, err := b.repo.ListTasks(ctx, userID, f)
 		if err != nil {
-			slog.Error("list tasks (nl)", "err", err, "user_id", userID)
-			b.sendText(chatID, "Не вдалося отримати список задач.")
-			return
+			return mustJSON(map[string]any{"ok": false, "error": "db error"})
 		}
-		slog.Info("tasks listed (nl)", "user_id", userID, "count", len(tasks))
-		b.sendText(chatID, formatTasks(tasks))
+		type outTask struct {
+			ID      int64   `json:"id"`
+			Text    string  `json:"text"`
+			DueDate *string `json:"due_date"`
+			Status  string  `json:"status"`
+		}
+		out := make([]outTask, 0, len(tasks))
+		for _, t := range tasks {
+			var due *string
+			if t.DueDate != nil {
+				s := t.DueDate.Format("2006-01-02")
+				due = &s
+			}
+			out = append(out, outTask{ID: t.ID, Text: t.Text, DueDate: due, Status: t.Status})
+		}
+		return mustJSON(map[string]any{"ok": true, "tasks": out})
+
+	case "request_delete_task":
+		var args struct {
+			TaskID int64 `json:"task_id"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		if err := b.repo.SetPendingDelete(ctx, userID, args.TaskID); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "db error"})
+		}
+		b.askDeleteConfirm(chatID, args.TaskID)
+		return mustJSON(map[string]any{"ok": true, "confirmation": "requested", "task_id": args.TaskID})
+
+	case "delete_task":
+		var args struct {
+			TaskID int64 `json:"task_id"`
+		}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "bad arguments"})
+		}
+		pendingID, ok, err := b.repo.GetPendingDelete(ctx, userID)
+		if err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": "db error"})
+		}
+		if !ok || pendingID != args.TaskID {
+			return mustJSON(map[string]any{"ok": false, "error": "not confirmed"})
+		}
+		if err := b.repo.DeleteTask(ctx, userID, args.TaskID); err != nil {
+			return mustJSON(map[string]any{"ok": false, "error": err.Error()})
+		}
+		_ = b.repo.ClearPendingDelete(ctx, userID)
+		return mustJSON(map[string]any{"ok": true})
+
+	case "cancel_delete":
+		_ = b.repo.ClearPendingDelete(ctx, userID)
+		return mustJSON(map[string]any{"ok": true})
 	default:
-		b.sendText(chatID, "Не зрозумів запит. Можна використати /start для команд.")
+		return mustJSON(map[string]any{"ok": false, "error": "unknown tool"})
 	}
 }
 
@@ -398,7 +568,7 @@ func (b *Bot) handleVoice(ctx context.Context, m *tgbotapi.Message) {
 	}
 
 	slog.Info("voice transcribed", "user_id", userID)
-	b.handleNaturalLanguage(ctx, chatID, userID, text)
+	b.handleChatInput(ctx, chatID, userID, text)
 }
 
 func (b *Bot) ensureKeyOrAsk(ctx context.Context, chatID int64, userID int64) (string, bool) {
@@ -460,18 +630,12 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		if err != nil {
 			return
 		}
-		if err := b.repo.DeleteTask(ctx, userID, id); err != nil {
-			slog.Warn("delete task", "err", err, "user_id", userID, "task_id", id)
-			b.sendText(chatID, "Не вдалося видалити задачу (перевірте ID).")
-			return
-		}
-		slog.Info("task deleted", "user_id", userID, "task_id", id)
-		b.sendText(chatID, fmt.Sprintf("Задачу #%d видалено.", id))
+		b.handleChatInput(ctx, chatID, userID, fmt.Sprintf("Підтверджую видалення задачі %d", id))
 		return
 	}
 
 	if strings.HasPrefix(data, "cancel_del:") {
-		b.sendText(chatID, "Видалення скасовано.")
+		b.handleChatInput(ctx, chatID, userID, "Скасувати видалення")
 		return
 	}
 }

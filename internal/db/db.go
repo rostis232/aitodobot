@@ -37,6 +37,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_user ON tasks(telegram_user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_status ON tasks(telegram_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_user_due ON tasks(telegram_user_id, due_date);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id BIGSERIAL PRIMARY KEY,
+  telegram_user_id BIGINT NOT NULL REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+  content TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_user_id ON chat_messages(telegram_user_id, id);
+
+CREATE TABLE IF NOT EXISTS pending_deletes (
+  telegram_user_id BIGINT PRIMARY KEY REFERENCES users(telegram_user_id) ON DELETE CASCADE,
+  task_id BIGINT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 `)
 	return err
 }

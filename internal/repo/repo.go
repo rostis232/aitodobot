@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"tg-tasks-bot/internal/crypto"
@@ -26,6 +27,11 @@ type Task struct {
 	Status    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type ChatMessage struct {
+	Role    string
+	Content string
 }
 
 func (r *Repo) EnsureUser(ctx context.Context, userID int64) error {
@@ -202,6 +208,72 @@ WHERE telegram_user_id=$1
 		return nil, err
 	}
 	return out, nil
+}
+
+func (r *Repo) AppendChatMessage(ctx context.Context, userID int64, role, content string) error {
+	_, err := r.pool.Exec(ctx, `
+INSERT INTO chat_messages (telegram_user_id, role, content) VALUES ($1,$2,$3)
+`, userID, role, content)
+	return err
+}
+
+func (r *Repo) LoadRecentChatMessages(ctx context.Context, userID int64, limit int) ([]ChatMessage, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := r.pool.Query(ctx, `
+SELECT role, content
+FROM chat_messages
+WHERE telegram_user_id=$1
+ORDER BY id DESC
+LIMIT $2
+`, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var rev []ChatMessage
+	for rows.Next() {
+		var m ChatMessage
+		if err := rows.Scan(&m.Role, &m.Content); err != nil {
+			return nil, err
+		}
+		rev = append(rev, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
+	}
+	return rev, nil
+}
+
+func (r *Repo) SetPendingDelete(ctx context.Context, userID, taskID int64) error {
+	_, err := r.pool.Exec(ctx, `
+INSERT INTO pending_deletes (telegram_user_id, task_id) VALUES ($1,$2)
+ON CONFLICT (telegram_user_id) DO UPDATE SET task_id=EXCLUDED.task_id, created_at=now()
+`, userID, taskID)
+	return err
+}
+
+func (r *Repo) GetPendingDelete(ctx context.Context, userID int64) (int64, bool, error) {
+	var taskID int64
+	err := r.pool.QueryRow(ctx, `SELECT task_id FROM pending_deletes WHERE telegram_user_id=$1`, userID).Scan(&taskID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	return taskID, true, nil
+}
+
+func (r *Repo) ClearPendingDelete(ctx context.Context, userID int64) error {
+	_, err := r.pool.Exec(ctx, `DELETE FROM pending_deletes WHERE telegram_user_id=$1`, userID)
+	return err
 }
 
 func itoa(i int) string {

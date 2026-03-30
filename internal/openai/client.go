@@ -47,6 +47,85 @@ func (c *Client) ValidateKey(ctx context.Context, apiKey string) error {
 	return fmt.Errorf("openai key validation failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(b)))
 }
 
+type ChatMessage struct {
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	Name       string     `json:"name,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+}
+
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"`
+	Function ToolCallFunction `json:"function"`
+}
+
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type Tool struct {
+	Type     string       `json:"type"`
+	Function ToolFunction `json:"function"`
+}
+
+type ToolFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters"`
+}
+
+func (c *Client) ChatCompletion(ctx context.Context, apiKey, model string, messages []ChatMessage, tools []Tool) (ChatMessage, string, error) {
+	reqBody := map[string]any{
+		"model":       model,
+		"temperature": 0.2,
+		"messages":    messages,
+	}
+	if len(tools) > 0 {
+		reqBody["tools"] = tools
+		reqBody["tool_choice"] = "auto"
+	}
+
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(reqBody); err != nil {
+		return ChatMessage{}, "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/chat/completions", &buf)
+	if err != nil {
+		return ChatMessage{}, "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return ChatMessage{}, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return ChatMessage{}, "", fmt.Errorf("openai chat error: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(b)))
+	}
+
+	var parsed struct {
+		Choices []struct {
+			FinishReason string      `json:"finish_reason"`
+			Message      ChatMessage `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return ChatMessage{}, "", err
+	}
+	if len(parsed.Choices) == 0 {
+		return ChatMessage{}, "", errors.New("openai chat: empty choices")
+	}
+	return parsed.Choices[0].Message, parsed.Choices[0].FinishReason, nil
+}
+
 type ParsedAction struct {
 	Action  string     `json:"action"`
 	TaskID  *int64     `json:"task_id,omitempty"`
